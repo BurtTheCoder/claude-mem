@@ -270,16 +270,16 @@ export interface SearchOptions extends SearchFilters {
 }
 
 export interface ObservationSearchResult extends ObservationRow {
-  rank?: number; // FTS5 relevance score (lower is better)
+  rank?: number; // Chroma distance score (lower is better)
   score?: number; // Normalized score (higher is better, 0-1)
 }
 
 export interface SessionSummarySearchResult extends SessionSummaryRow {
-  rank?: number; // FTS5 relevance score (lower is better)
+  rank?: number; // Chroma distance score (lower is better)
   score?: number; // Normalized score (higher is better, 0-1)
 }
 
 export interface UserPromptSearchResult extends UserPromptRow {
-  rank?: number; // FTS5 relevance score (lower is better)
+  rank?: number; // Chroma distance score (lower is better)
   score?: number; // Normalized score (higher is better, 0-1)
 }

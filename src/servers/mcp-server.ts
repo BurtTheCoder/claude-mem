@@ -192,9 +192,9 @@ const tools = [
   },
   {
     name: 'search_observations',
-    description: '[DEPRECATED - Use "search" with type="observations" instead] Search observations (facts/narratives) using FTS5 full-text search. Supports filtering by type, concepts, files, and date range.',
+    description: '[DEPRECATED - Use "search" with type="observations" instead] Search observations (facts/narratives) using semantic vector search. Supports filtering by type, concepts, files, and date range.',
     inputSchema: z.object({
-      query: z.string().optional().describe('Full-text search query (FTS5)'),
+      query: z.string().optional().describe('Semantic search query'),
       format: z.enum(['index', 'full']).default('index').describe('Output format: "index" for titles/dates only (default, RECOMMENDED), "full" for complete details'),
       type: z.string().optional().describe('Filter by observation type (single value or comma-separated list: decision,bugfix,feature,refactor,discovery,change)'),
       concepts: z.string().optional().describe('Filter by concept tags (single value or comma-separated list)'),
@@ -213,9 +213,9 @@ const tools = [
   },
   {
     name: 'search_sessions',
-    description: '[DEPRECATED - Use "search" with type="sessions" instead] Search session summaries using FTS5 full-text search. Returns both request_summary and learned_summary fields.',
+    description: '[DEPRECATED - Use "search" with type="sessions" instead] Search session summaries using semantic vector search. Returns both request_summary and learned_summary fields.',
     inputSchema: z.object({
-      query: z.string().optional().describe('Full-text search query (FTS5)'),
+      query: z.string().optional().describe('Semantic search query'),
       format: z.enum(['index', 'full']).default('index').describe('Output format: "index" for titles/dates only (default, RECOMMENDED), "full" for complete details'),
       project: z.string().optional().describe('Filter by project name'),
       dateStart: z.union([z.string(), z.number()]).optional().describe('Start date for filtering (ISO string or epoch timestamp)'),
@@ -231,9 +231,9 @@ const tools = [
   },
   {
     name: 'search_user_prompts',
-    description: '[DEPRECATED - Use "search" with type="prompts" instead] Search user prompts using FTS5 full-text search. Searches prompt text only.',
+    description: '[DEPRECATED - Use "search" with type="prompts" instead] Search user prompts using semantic vector search. Searches prompt text only.',
     inputSchema: z.object({
-      query: z.string().optional().describe('Full-text search query (FTS5)'),
+      query: z.string().optional().describe('Semantic search query'),
       format: z.enum(['index', 'full']).default('index').describe('Output format: "index" for titles/dates only (default, RECOMMENDED), "full" for complete details'),
       project: z.string().optional().describe('Filter by project name'),
       dateStart: z.union([z.string(), z.number()]).optional().describe('Start date for filtering (ISO string or epoch timestamp)'),

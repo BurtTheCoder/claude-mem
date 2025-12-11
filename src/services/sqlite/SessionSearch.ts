@@ -1,5 +1,4 @@
 import Database from 'better-sqlite3';
-import { TableNameRow } from '../../types/database.js';
 import { DATA_DIR, DB_PATH, ensureDir } from '../../shared/paths.js';
 import {
   ObservationSearchResult,
@@ -19,134 +18,30 @@ import {
  */
 export class SessionSearch {
   private db: Database.Database;
-
-  constructor(dbPath?: string) {
-    if (!dbPath) {
-      ensureDir(DATA_DIR);
-      dbPath = DB_PATH;
-    }
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-
-    // Ensure FTS tables exist
-    this.ensureFTSTables();
-  }
+  private ownsConnection: boolean;
 
   /**
-   * Ensure FTS5 tables exist (backward compatibility only - no longer used for search)
-   *
-   * FTS5 tables are maintained for backward compatibility but not used for search.
-   * Vector search (Chroma) is now the primary search mechanism.
-   *
-   * Retention Rationale:
-   * - Prevents breaking existing installations with FTS5 tables
-   * - Allows graceful migration path for users
-   * - Tables maintained but search paths removed
-   * - Triggers still fire to keep tables synchronized
-   *
-   * TODO: Remove FTS5 infrastructure in future major version (v7.0.0)
+   * Create a SessionSearch instance
+   * @param dbOrPath - Either a shared Database instance or a path string
+   *                   If a Database instance is provided, this class will NOT close it
+   *                   If a path (or nothing) is provided, this class owns and manages the connection
    */
-  private ensureFTSTables(): void {
-    try {
-      // Check if FTS tables already exist
-      const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts'").all() as TableNameRow[];
-      const hasFTS = tables.some(t => t.name === 'observations_fts' || t.name === 'session_summaries_fts');
-
-      if (hasFTS) {
-        // Already migrated
-        return;
+  constructor(dbOrPath?: Database.Database | string) {
+    if (dbOrPath instanceof Database) {
+      // Shared connection - don't close it
+      this.db = dbOrPath;
+      this.ownsConnection = false;
+    } else {
+      // Create our own connection
+      const dbPath = dbOrPath || DB_PATH;
+      if (!dbOrPath) {
+        ensureDir(DATA_DIR);
       }
-
-      console.error('[SessionSearch] Creating FTS5 tables...');
-
-      // Create observations_fts virtual table
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
-          title,
-          subtitle,
-          narrative,
-          text,
-          facts,
-          concepts,
-          content='observations',
-          content_rowid='id'
-        );
-      `);
-
-      // Populate with existing data
-      this.db.exec(`
-        INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
-        SELECT id, title, subtitle, narrative, text, facts, concepts
-        FROM observations;
-      `);
-
-      // Create triggers for observations
-      this.db.exec(`
-        CREATE TRIGGER IF NOT EXISTS observations_ai AFTER INSERT ON observations BEGIN
-          INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
-          VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS observations_ad AFTER DELETE ON observations BEGIN
-          INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
-          VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
-          INSERT INTO observations_fts(observations_fts, rowid, title, subtitle, narrative, text, facts, concepts)
-          VALUES('delete', old.id, old.title, old.subtitle, old.narrative, old.text, old.facts, old.concepts);
-          INSERT INTO observations_fts(rowid, title, subtitle, narrative, text, facts, concepts)
-          VALUES (new.id, new.title, new.subtitle, new.narrative, new.text, new.facts, new.concepts);
-        END;
-      `);
-
-      // Create session_summaries_fts virtual table
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS session_summaries_fts USING fts5(
-          request,
-          investigated,
-          learned,
-          completed,
-          next_steps,
-          notes,
-          content='session_summaries',
-          content_rowid='id'
-        );
-      `);
-
-      // Populate with existing data
-      this.db.exec(`
-        INSERT INTO session_summaries_fts(rowid, request, investigated, learned, completed, next_steps, notes)
-        SELECT id, request, investigated, learned, completed, next_steps, notes
-        FROM session_summaries;
-      `);
-
-      // Create triggers for session_summaries
-      this.db.exec(`
-        CREATE TRIGGER IF NOT EXISTS session_summaries_ai AFTER INSERT ON session_summaries BEGIN
-          INSERT INTO session_summaries_fts(rowid, request, investigated, learned, completed, next_steps, notes)
-          VALUES (new.id, new.request, new.investigated, new.learned, new.completed, new.next_steps, new.notes);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS session_summaries_ad AFTER DELETE ON session_summaries BEGIN
-          INSERT INTO session_summaries_fts(session_summaries_fts, rowid, request, investigated, learned, completed, next_steps, notes)
-          VALUES('delete', old.id, old.request, old.investigated, old.learned, old.completed, old.next_steps, old.notes);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS session_summaries_au AFTER UPDATE ON session_summaries BEGIN
-          INSERT INTO session_summaries_fts(session_summaries_fts, rowid, request, investigated, learned, completed, next_steps, notes)
-          VALUES('delete', old.id, old.request, old.investigated, old.learned, old.completed, old.next_steps, old.notes);
-          INSERT INTO session_summaries_fts(rowid, request, investigated, learned, completed, next_steps, notes)
-          VALUES (new.id, new.request, new.investigated, new.learned, new.completed, new.next_steps, new.notes);
-        END;
-      `);
-
-      console.error('[SessionSearch] FTS5 tables created successfully');
-    } catch (error: any) {
-      console.error('[SessionSearch] FTS migration error:', error.message);
+      this.db = new Database(dbPath);
+      this.db.pragma('journal_mode = WAL');
+      this.ownsConnection = true;
     }
   }
-
 
   /**
    * Build WHERE clause for structured filters
@@ -225,11 +120,13 @@ export class SessionSearch {
 
   /**
    * Build ORDER BY clause
+   * Note: 'relevance' ordering is handled by Chroma (vector search), not SQLite
    */
-  private buildOrderClause(orderBy: SearchOptions['orderBy'] = 'relevance', hasFTS: boolean = true, ftsTable: string = 'observations_fts'): string {
+  private buildOrderClause(orderBy: SearchOptions['orderBy'] = 'relevance'): string {
     switch (orderBy) {
       case 'relevance':
-        return hasFTS ? `ORDER BY ${ftsTable}.rank ASC` : 'ORDER BY o.created_at_epoch DESC';
+        // For filter-only queries, relevance falls back to recency
+        return 'ORDER BY o.created_at_epoch DESC';
       case 'date_desc':
         return 'ORDER BY o.created_at_epoch DESC';
       case 'date_asc':
@@ -255,7 +152,7 @@ export class SessionSearch {
         throw new Error('Either query or filters required for search');
       }
 
-      const orderClause = this.buildOrderClause(orderBy, false);
+      const orderClause = this.buildOrderClause(orderBy);
 
       const sql = `
         SELECT o.*, o.discovery_tokens
@@ -521,9 +418,11 @@ export class SessionSearch {
   }
 
   /**
-   * Close the database connection
+   * Close the database connection (only if we own it)
    */
   close(): void {
-    this.db.close();
+    if (this.ownsConnection) {
+      this.db.close();
+    }
   }
 }

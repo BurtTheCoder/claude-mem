@@ -40,6 +40,7 @@ export class SessionStore {
     this.makeObservationsTextNullable();
     this.createUserPromptsTable();
     this.ensureDiscoveryTokensColumn();
+    this.dropFTS5Infrastructure();
   }
 
   /**
@@ -539,6 +540,62 @@ export class SessionStore {
     } catch (error: any) {
       console.error('[SessionStore] Discovery tokens migration error:', error.message);
       throw error; // Re-throw to prevent silent failures
+    }
+  }
+
+  /**
+   * Drop FTS5 infrastructure (migration 12)
+   *
+   * FTS5 (Full-Text Search) tables and triggers are no longer needed because:
+   * - ChromaDB provides superior semantic/vector search
+   * - FTS5 triggers add overhead on every INSERT/UPDATE/DELETE
+   * - FTS5 tables consume disk space without providing value
+   *
+   * This migration safely drops:
+   * - observations_fts, session_summaries_fts, user_prompts_fts virtual tables
+   * - All associated triggers (observations_ai/ad/au, session_summaries_ai/ad/au, user_prompts_ai/ad/au)
+   */
+  private dropFTS5Infrastructure(): void {
+    try {
+      // Check if migration already applied
+      const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(12) as SchemaVersion | undefined;
+      if (applied) return;
+
+      console.error('[SessionStore] Dropping FTS5 infrastructure (no longer needed - using ChromaDB)...');
+
+      // Drop triggers first (they reference the tables)
+      const triggers = [
+        'observations_ai', 'observations_ad', 'observations_au',
+        'session_summaries_ai', 'session_summaries_ad', 'session_summaries_au',
+        'user_prompts_ai', 'user_prompts_ad', 'user_prompts_au'
+      ];
+
+      for (const trigger of triggers) {
+        try {
+          this.db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+        } catch {
+          // Trigger might not exist, ignore
+        }
+      }
+
+      // Drop FTS5 virtual tables
+      const ftsTables = ['observations_fts', 'session_summaries_fts', 'user_prompts_fts'];
+
+      for (const table of ftsTables) {
+        try {
+          this.db.exec(`DROP TABLE IF EXISTS ${table}`);
+        } catch {
+          // Table might not exist, ignore
+        }
+      }
+
+      // Record migration
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(12, new Date().toISOString());
+
+      console.error('[SessionStore] Successfully dropped FTS5 infrastructure');
+    } catch (error: any) {
+      console.error('[SessionStore] FTS5 cleanup migration error:', error.message);
+      // Don't throw - this is a cleanup migration, not critical
     }
   }
 

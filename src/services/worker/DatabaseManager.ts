@@ -21,11 +21,14 @@ export class DatabaseManager {
 
   /**
    * Initialize database connection (once, stays open)
+   * Uses a single shared database connection for both SessionStore and SessionSearch
    */
   async initialize(): Promise<void> {
     // Open database connection (ONCE)
     this.sessionStore = new SessionStore();
-    this.sessionSearch = new SessionSearch();
+
+    // Share the database connection with SessionSearch (avoids duplicate connections)
+    this.sessionSearch = new SessionSearch(this.sessionStore.db);
 
     // Initialize ChromaSync
     this.chromaSync = new ChromaSync('claude-mem');
