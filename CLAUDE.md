@@ -26,6 +26,7 @@ The simplified architecture uses direct SQLite access with no external dependenc
 
 **Key Components**:
 - `src/prototype/SimpleMemory.ts` - Core database class with vector search
+- `src/prototype/viewer-server.ts` - Minimal Express server for viewer UI
 - `src/hooks/*-simple.ts` - Simplified hooks using direct DB access
 - `~/.claude-mem/simple-memory.db` - Single SQLite database file
 - `~/.claude-mem/models/all-MiniLM-L6-v2.gguf` - Embedding model (optional)
@@ -77,6 +78,7 @@ The simplified architecture uses direct SQLite access with no external dependenc
 npm run setup:model        # Download embedding model (~24MB)
 npm run test:prototype     # Test SimpleMemory functionality
 npm run migrate:simple     # Import data from legacy database
+npm run viewer             # Start viewer UI (http://localhost:37777)
 ```
 
 ## Configuration

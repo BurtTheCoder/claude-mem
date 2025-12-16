@@ -47,7 +47,8 @@
     "usage:today": "node scripts/analyze-usage.js $(date +%Y-%m-%d)",
     "setup:model": "node scripts/setup-model.js",
     "test:prototype": "npx tsx src/prototype/test-simple-memory.ts",
-    "migrate:simple": "node scripts/migrate-to-simple.js"
+    "migrate:simple": "node scripts/migrate-to-simple.js",
+    "viewer": "npx tsx src/prototype/viewer-server.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.27",
