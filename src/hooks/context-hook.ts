@@ -1,72 +1,88 @@
 /**
- * Context Hook - SessionStart
+ * Context Hook - SessionStart (Simplified Architecture)
  *
- * Pure HTTP client - calls worker to generate context.
- * This allows the hook to run under any runtime (Node.js or Bun) since it has no
- * native module dependencies.
+ * Direct SQLite access using SimpleMemory - no HTTP worker required.
+ * Uses sqlite-vec for vector search and sqlite-lembed for embeddings.
  */
 
-import path from "path";
-import { stdin } from "process";
-import { ensureWorkerRunning, getWorkerPort } from "../shared/worker-utils.js";
-import { HOOK_TIMEOUTS } from "../shared/hook-constants.js";
-import { handleWorkerError } from "../shared/hook-error-handler.js";
+import path from 'path';
+import { stdin } from 'process';
+import { getSimpleMemory } from '../core/SimpleMemory.js';
 
 export interface SessionStartInput {
   session_id: string;
-  transcript_path: string;
+  transcript_path?: string;
   cwd: string;
   hook_event_name?: string;
 }
 
-async function contextHook(input?: SessionStartInput): Promise<string> {
-  // Ensure worker is running before any other logic
-  await ensureWorkerRunning();
-
+/**
+ * Generate context for session start
+ */
+function generateContext(input?: SessionStartInput): string {
   const cwd = input?.cwd ?? process.cwd();
-  const project = cwd ? path.basename(cwd) : "unknown-project";
-  const port = getWorkerPort();
-
-  const url = `http://127.0.0.1:${port}/api/context/inject?project=${encodeURIComponent(project)}`;
+  const project = cwd ? path.basename(cwd) : 'unknown-project';
 
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(HOOK_TIMEOUTS.DEFAULT) });
+    const memory = getSimpleMemory();
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Failed to fetch context: ${response.status} ${errorText}`);
+    // Start/update session
+    if (input?.session_id) {
+      memory.startSession(input.session_id, project, '');
     }
 
-    const result = await response.text();
-    return result.trim();
+    // Get recent events for this project
+    const events = memory.getRecentEvents(project, 50);
+
+    if (events.length === 0) {
+      return '';
+    }
+
+    // Format as context
+    const context = memory.formatContext(events);
+
+    // Wrap in system tag to prevent recursive storage
+    return `<claude-mem-context>\n${context}\n</claude-mem-context>`;
   } catch (error: any) {
-    handleWorkerError(error);
+    // Silent failure - don't block session start
+    console.error('[context-hook] Error:', error.message);
+    return '';
   }
 }
 
 // Entry Point - handle stdin/stdout
-const forceColors = process.argv.includes("--colors");
+const forceColors = process.argv.includes('--colors');
 
 if (stdin.isTTY || forceColors) {
-  contextHook(undefined).then((text) => {
-    console.log(text);
-    process.exit(0);
-  });
+  const text = generateContext(undefined);
+  console.log(text);
+  process.exit(0);
 } else {
-  let input = "";
-  stdin.on("data", (chunk) => (input += chunk));
-  stdin.on("end", async () => {
+  let input = '';
+  stdin.on('data', (chunk) => (input += chunk));
+  stdin.on('end', () => {
     const parsed = input.trim() ? JSON.parse(input) : undefined;
-    const text = await contextHook(parsed);
+    const text = generateContext(parsed);
 
-    console.log(
-      JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: "SessionStart",
-          additionalContext: text,
-        },
-      })
-    );
+    if (text) {
+      console.log(
+        JSON.stringify({
+          continue: true,
+          suppressOutput: true,
+          hookSpecificOutput: {
+            hookEventName: 'SessionStart',
+            additionalContext: text,
+          },
+        })
+      );
+    } else {
+      console.log(
+        JSON.stringify({
+          continue: true,
+          suppressOutput: true,
+        })
+      );
+    }
     process.exit(0);
   });
 }

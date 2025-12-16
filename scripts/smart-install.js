@@ -26,6 +26,8 @@ const PACKAGE_JSON_PATH = join(MARKETPLACE_ROOT, 'package.json');
 const VERSION_MARKER_PATH = join(MARKETPLACE_ROOT, '.install-version');
 const NODE_MODULES_PATH = join(MARKETPLACE_ROOT, 'node_modules');
 const BETTER_SQLITE3_PATH = join(NODE_MODULES_PATH, 'better-sqlite3');
+const SQLITE_VEC_PATH = join(NODE_MODULES_PATH, 'sqlite-vec');
+const SQLITE_LEMBED_PATH = join(NODE_MODULES_PATH, 'sqlite-lembed');
 
 // Colors for output
 const colors = {
@@ -104,9 +106,17 @@ function needsInstall() {
     return true;
   }
 
-  // Check if better-sqlite3 is installed
+  // Check if required native modules are installed
   if (!existsSync(BETTER_SQLITE3_PATH)) {
     log('📦 better-sqlite3 missing - reinstalling', colors.cyan);
+    return true;
+  }
+  if (!existsSync(SQLITE_VEC_PATH)) {
+    log('📦 sqlite-vec missing - reinstalling', colors.cyan);
+    return true;
+  }
+  if (!existsSync(SQLITE_LEMBED_PATH)) {
+    log('📦 sqlite-lembed missing - reinstalling', colors.cyan);
     return true;
   }
 
@@ -144,7 +154,7 @@ function needsInstall() {
 }
 
 /**
- * Verify that better-sqlite3 native module loads correctly
+ * Verify that native modules load correctly
  * This catches ABI mismatches and corrupted builds
  */
 async function verifyNativeModules() {
@@ -155,12 +165,17 @@ async function verifyNativeModules() {
     // This script may run from cache but must load modules from marketplace's node_modules
     const require = createRequire(join(MARKETPLACE_ROOT, 'package.json'));
     const Database = require('better-sqlite3');
+    const sqliteVec = require('sqlite-vec');
 
     // Try to create a test in-memory database
     const db = new Database(':memory:');
 
+    // Load sqlite-vec extension
+    sqliteVec.load(db);
+
     // Run a simple query to ensure it works
     const result = db.prepare('SELECT 1 + 1 as result').get();
+    const vecVersion = db.prepare("SELECT vec_version()").get();
 
     // Clean up
     db.close();

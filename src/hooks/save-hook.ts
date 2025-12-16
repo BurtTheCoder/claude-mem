@@ -1,18 +1,14 @@
 /**
- * Save Hook - PostToolUse
+ * Save Hook - PostToolUse (Simplified Architecture)
  *
- * Pure HTTP client - sends data to worker, worker handles all database operations
- * including privacy checks. This allows the hook to run under any runtime
- * (Node.js or Bun) since it has no native module dependencies.
+ * Direct SQLite access using SimpleMemory - no HTTP worker required.
+ * Deterministic metadata extraction, no LLM processing on write path.
  */
 
+import path from 'path';
 import { stdin } from 'process';
-import { createHookResponse } from './hook-response.js';
-import { logger } from '../utils/logger.js';
-import { ensureWorkerRunning, getWorkerPort } from '../shared/worker-utils.js';
-import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
-import { happy_path_error__with_fallback } from '../utils/silent-debug.js';
-import { handleWorkerError } from '../shared/hook-error-handler.js';
+import { getSimpleMemory } from '../core/SimpleMemory.js';
+import { stripMemoryTagsFromJson } from '../utils/tag-stripping.js';
 
 export interface PostToolUseInput {
   session_id: string;
@@ -22,66 +18,79 @@ export interface PostToolUseInput {
   tool_response: any;
 }
 
-/**
- * Save Hook Main Logic - Fire-and-forget HTTP client
- */
-async function saveHook(input?: PostToolUseInput): Promise<void> {
-  // Ensure worker is running before any other logic
-  await ensureWorkerRunning();
+// Tools to skip (don't add value to memory)
+const SKIP_TOOLS = new Set([
+  'TodoWrite',
+  'SlashCommand',
+  'Skill',
+  'AskUserQuestion',
+  'ExitPlanMode',
+]);
 
+/**
+ * Save tool event to memory
+ */
+function saveEvent(input?: PostToolUseInput): void {
   if (!input) {
-    throw new Error('saveHook requires input');
+    return;
   }
 
   const { session_id, cwd, tool_name, tool_input, tool_response } = input;
 
-  const port = getWorkerPort();
-
-  const toolStr = logger.formatTool(tool_name, tool_input);
-
-  logger.dataIn('HOOK', `PostToolUse: ${toolStr}`, {
-    workerPort: port
-  });
-
-  try {
-    // Send to worker - worker handles privacy check and database operations
-    const response = await fetch(`http://127.0.0.1:${port}/api/sessions/observations`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        claudeSessionId: session_id,
-        tool_name,
-        tool_input,
-        tool_response,
-        cwd: happy_path_error__with_fallback(
-          'Missing cwd in PostToolUse hook input',
-          { session_id, tool_name },
-          cwd || ''
-        )
-      }),
-      signal: AbortSignal.timeout(HOOK_TIMEOUTS.DEFAULT)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      logger.failure('HOOK', 'Failed to send observation', {
-        status: response.status
-      }, errorText);
-      throw new Error(`Failed to send observation to worker: ${response.status} ${errorText}`);
-    }
-
-    logger.debug('HOOK', 'Observation sent successfully', { toolName: tool_name });
-  } catch (error: any) {
-    handleWorkerError(error);
+  // Skip certain tools
+  if (SKIP_TOOLS.has(tool_name)) {
+    return;
   }
 
-  console.log(createHookResponse('PostToolUse', true));
+  const project = cwd ? path.basename(cwd) : 'unknown-project';
+
+  try {
+    // Serialize and strip privacy tags
+    const inputStr = typeof tool_input === 'string'
+      ? tool_input
+      : JSON.stringify(tool_input);
+    const outputStr = typeof tool_response === 'string'
+      ? tool_response
+      : JSON.stringify(tool_response);
+
+    const cleanInput = stripMemoryTagsFromJson(inputStr);
+    const cleanOutput = stripMemoryTagsFromJson(outputStr);
+
+    // Skip if everything was stripped (was all private content)
+    if (!cleanInput && !cleanOutput) {
+      return;
+    }
+
+    const memory = getSimpleMemory();
+
+    // Record the event (synchronous, no LLM)
+    memory.recordEvent({
+      session_id,
+      project,
+      tool_name,
+      tool_input: cleanInput,
+      tool_output: cleanOutput,
+      cwd: cwd || '',
+      created_at: Date.now(),
+    });
+  } catch (error: any) {
+    // Silent failure - don't block tool execution
+    console.error('[save-hook] Error:', error.message);
+  }
 }
 
 // Entry Point
 let input = '';
-stdin.on('data', (chunk) => input += chunk);
-stdin.on('end', async () => {
+stdin.on('data', (chunk) => (input += chunk));
+stdin.on('end', () => {
   const parsed = input ? JSON.parse(input) : undefined;
-  await saveHook(parsed);
+  saveEvent(parsed);
+
+  // Standard response for PostToolUse
+  console.log(
+    JSON.stringify({
+      continue: true,
+      suppressOutput: true,
+    })
+  );
 });

@@ -16,7 +16,7 @@ import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import { getSimpleMemory, ToolEvent } from './SimpleMemory.js';
+import { getSimpleMemory, ToolEvent } from '../core/SimpleMemory.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_DIR = path.resolve(__dirname, '../../plugin');

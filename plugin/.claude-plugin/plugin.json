@@ -1,7 +1,7 @@
 {
   "name": "claude-mem",
-  "version": "7.0.7",
-  "description": "Persistent memory system for Claude Code - seamlessly preserve context across sessions",
+  "version": "8.0.0",
+  "description": "Persistent memory system for Claude Code - seamlessly preserve context across sessions with semantic search",
   "author": {
     "name": "Alex Newman"
   },
@@ -11,7 +11,8 @@
     "memory",
     "context",
     "persistence",
-    "hooks",
-    "mcp"
+    "sqlite",
+    "embeddings",
+    "semantic-search"
   ]
 }
