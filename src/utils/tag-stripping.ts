@@ -7,22 +7,17 @@
  * 2. <private> - User-level tag for manual privacy control
  *    (allows users to mark content they don't want persisted)
  *
- * EDGE PROCESSING PATTERN: Filter at hook layer before sending to worker/storage.
- * This keeps the worker service simple and follows one-way data stream.
+ * EDGE PROCESSING PATTERN: Filter at hook layer before sending to storage.
  */
-
-import { happy_path_error__with_fallback } from './silent-debug.js';
 
 /**
  * Maximum number of tags allowed in a single content block
- * This protects against ReDoS (Regular Expression Denial of Service) attacks
- * where malicious input with many nested/unclosed tags could cause catastrophic backtracking
+ * Protects against ReDoS attacks with many nested/unclosed tags
  */
 const MAX_TAG_COUNT = 100;
 
 /**
  * Count total number of opening tags in content
- * Used for ReDoS protection before regex processing
  */
 function countTags(content: string): number {
   const privateCount = (content.match(/<private>/g) || []).length;
@@ -35,25 +30,16 @@ function countTags(content: string): number {
  *
  * @param content - Stringified JSON content from tool_input or tool_response
  * @returns Cleaned content with tags removed, or '{}' if non-string/invalid
- *
- * Note: Returns '{}' for non-strings because this is used in JSON context
- * where we need a valid JSON object if the input is invalid.
  */
 export function stripMemoryTagsFromJson(content: string): string {
   if (typeof content !== 'string') {
-    happy_path_error__with_fallback('[tag-stripping] received non-string for JSON context:', { type: typeof content });
     return '{}';  // Safe default for JSON context
   }
 
   // ReDoS protection: limit tag count before regex processing
-  const tagCount = countTags(content);
-  if (tagCount > MAX_TAG_COUNT) {
-    happy_path_error__with_fallback('[tag-stripping] tag count exceeds limit, truncating:', {
-      tagCount,
-      maxAllowed: MAX_TAG_COUNT,
-      contentLength: content.length
-    });
-    // Still process but log the anomaly
+  if (countTags(content) > MAX_TAG_COUNT) {
+    // Log and continue - still process the content
+    console.error('[tag-stripping] Tag count exceeds limit');
   }
 
   return content
@@ -67,25 +53,15 @@ export function stripMemoryTagsFromJson(content: string): string {
  *
  * @param content - Raw user prompt text
  * @returns Cleaned content with tags removed, or '' if non-string/invalid
- *
- * Note: Returns '' (empty string) for non-strings because this is used in prompt context
- * where an empty prompt indicates the user didn't provide any content.
  */
 export function stripMemoryTagsFromPrompt(content: string): string {
   if (typeof content !== 'string') {
-    happy_path_error__with_fallback('[tag-stripping] received non-string for prompt context:', { type: typeof content });
     return '';  // Safe default for prompt content
   }
 
   // ReDoS protection: limit tag count before regex processing
-  const tagCount = countTags(content);
-  if (tagCount > MAX_TAG_COUNT) {
-    happy_path_error__with_fallback('[tag-stripping] tag count exceeds limit, truncating:', {
-      tagCount,
-      maxAllowed: MAX_TAG_COUNT,
-      contentLength: content.length
-    });
-    // Still process but log the anomaly
+  if (countTags(content) > MAX_TAG_COUNT) {
+    console.error('[tag-stripping] Tag count exceeds limit');
   }
 
   return content

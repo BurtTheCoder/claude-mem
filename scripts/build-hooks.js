@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * Build script for claude-mem hooks
- * Bundles TypeScript hooks into individual standalone executables using esbuild
+ * Build script for claude-mem (simplified architecture)
+ * Bundles TypeScript hooks into standalone executables using esbuild
  */
 
 import { build } from 'esbuild';
@@ -12,32 +12,21 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Simplified architecture: 3 hooks with direct SQLite access
 const HOOKS = [
   { name: 'context-hook', source: 'src/hooks/context-hook.ts' },
   { name: 'new-hook', source: 'src/hooks/new-hook.ts' },
   { name: 'save-hook', source: 'src/hooks/save-hook.ts' },
-  { name: 'summary-hook', source: 'src/hooks/summary-hook.ts' },
-  { name: 'cleanup-hook', source: 'src/hooks/cleanup-hook.ts' },
-  { name: 'user-message-hook', source: 'src/hooks/user-message-hook.ts' }
 ];
 
-const WORKER_SERVICE = {
-  name: 'worker-service',
-  source: 'src/services/worker-service.ts'
-};
-
-const MCP_SERVER = {
-  name: 'mcp-server',
-  source: 'src/servers/mcp-server.ts'
-};
-
-const CONTEXT_GENERATOR = {
-  name: 'context-generator',
-  source: 'src/services/context-generator.ts'
+// Viewer server (optional, for browsing history)
+const VIEWER_SERVER = {
+  name: 'viewer-server',
+  source: 'src/services/viewer-server.ts'
 };
 
 async function buildHooks() {
-  console.log('🔨 Building claude-mem hooks and worker service...\n');
+  console.log('🔨 Building claude-mem (simplified architecture)...\n');
 
   try {
     // Read version from package.json
@@ -58,18 +47,19 @@ async function buildHooks() {
     }
     console.log('✓ Output directories ready');
 
-    // Generate plugin/package.json for cache directory dependency installation
-    // The bundled hooks use `external: ['better-sqlite3']` so dependencies must be
-    // installed at runtime. This package.json enables npm install in the cache directory.
+    // Generate plugin/package.json for runtime dependencies
+    // Native modules are external and installed in the plugin cache directory
     console.log('\n📦 Generating plugin package.json...');
     const pluginPackageJson = {
       name: 'claude-mem-plugin',
       version: version,
       private: true,
-      description: 'Runtime dependencies for claude-mem bundled hooks',
+      description: 'Runtime dependencies for claude-mem hooks',
       type: 'module',
       dependencies: {
-        'better-sqlite3': packageJson.dependencies['better-sqlite3']
+        'better-sqlite3': packageJson.dependencies['better-sqlite3'],
+        'sqlite-vec': packageJson.dependencies['sqlite-vec'],
+        'sqlite-lembed': packageJson.dependencies['sqlite-lembed'],
       },
       engines: {
         node: '>=18.0.0'
@@ -92,18 +82,18 @@ async function buildHooks() {
       });
     });
 
-    // Build worker service
-    console.log(`\n🔧 Building worker service...`);
+    // Build viewer server
+    console.log(`\n🔧 Building viewer server...`);
     await build({
-      entryPoints: [WORKER_SERVICE.source],
+      entryPoints: [VIEWER_SERVER.source],
       bundle: true,
       platform: 'node',
       target: 'node18',
-      format: 'cjs',
-      outfile: `${hooksDir}/${WORKER_SERVICE.name}.cjs`,
+      format: 'esm',
+      outfile: `${hooksDir}/${VIEWER_SERVER.name}.js`,
       minify: true,
-      logLevel: 'error', // Suppress warnings (import.meta warning is benign)
-      external: ['better-sqlite3'],
+      logLevel: 'error',
+      external: ['better-sqlite3', 'sqlite-vec', 'sqlite-lembed'],
       define: {
         '__DEFAULT_PACKAGE_VERSION__': `"${version}"`
       },
@@ -111,56 +101,9 @@ async function buildHooks() {
         js: '#!/usr/bin/env node'
       }
     });
-
-    // Make worker service executable
-    fs.chmodSync(`${hooksDir}/${WORKER_SERVICE.name}.cjs`, 0o755);
-    const workerStats = fs.statSync(`${hooksDir}/${WORKER_SERVICE.name}.cjs`);
-    console.log(`✓ worker-service built (${(workerStats.size / 1024).toFixed(2)} KB)`);
-
-    // Build MCP server
-    console.log(`\n🔧 Building MCP server...`);
-    await build({
-      entryPoints: [MCP_SERVER.source],
-      bundle: true,
-      platform: 'node',
-      target: 'node18',
-      format: 'cjs',
-      outfile: `${hooksDir}/${MCP_SERVER.name}.cjs`,
-      minify: true,
-      logLevel: 'error',
-      external: ['better-sqlite3'],
-      define: {
-        '__DEFAULT_PACKAGE_VERSION__': `"${version}"`
-      },
-      banner: {
-        js: '#!/usr/bin/env node'
-      }
-    });
-
-    // Make MCP server executable
-    fs.chmodSync(`${hooksDir}/${MCP_SERVER.name}.cjs`, 0o755);
-    const mcpServerStats = fs.statSync(`${hooksDir}/${MCP_SERVER.name}.cjs`);
-    console.log(`✓ mcp-server built (${(mcpServerStats.size / 1024).toFixed(2)} KB)`);
-
-    // Build context generator
-    console.log(`\n🔧 Building context generator...`);
-    await build({
-      entryPoints: [CONTEXT_GENERATOR.source],
-      bundle: true,
-      platform: 'node',
-      target: 'node18',
-      format: 'cjs',
-      outfile: `${hooksDir}/${CONTEXT_GENERATOR.name}.cjs`,
-      minify: true,
-      logLevel: 'error',
-      external: ['better-sqlite3'],
-      define: {
-        '__DEFAULT_PACKAGE_VERSION__': `"${version}"`
-      }
-    });
-
-    const contextGenStats = fs.statSync(`${hooksDir}/${CONTEXT_GENERATOR.name}.cjs`);
-    console.log(`✓ context-generator built (${(contextGenStats.size / 1024).toFixed(2)} KB)`);
+    fs.chmodSync(`${hooksDir}/${VIEWER_SERVER.name}.js`, 0o755);
+    const viewerStats = fs.statSync(`${hooksDir}/${VIEWER_SERVER.name}.js`);
+    console.log(`✓ viewer-server built (${(viewerStats.size / 1024).toFixed(2)} KB)`);
 
     // Build each hook
     for (const hook of HOOKS) {
@@ -176,7 +119,7 @@ async function buildHooks() {
         format: 'esm',
         outfile,
         minify: true,
-        external: ['better-sqlite3'],
+        external: ['better-sqlite3', 'sqlite-vec', 'sqlite-lembed'],
         define: {
           '__DEFAULT_PACKAGE_VERSION__': `"${version}"`
         },
@@ -194,13 +137,15 @@ async function buildHooks() {
       console.log(`✓ ${hook.name} built (${sizeInKB} KB)`);
     }
 
-    console.log('\n✅ All hooks, worker service, and MCP server built successfully!');
+    console.log('\n✅ Build complete!');
     console.log(`   Output: ${hooksDir}/`);
-    console.log(`   - Hooks: *-hook.js`);
-    console.log(`   - Worker: worker-service.cjs`);
-    console.log(`   - MCP Server: mcp-server.cjs`);
-    console.log(`   - Skills: plugin/skills/`);
-    console.log('\n💡 Note: Dependencies will be auto-installed on first hook execution');
+    console.log('   Hooks:');
+    console.log('   - context-hook.js (SessionStart: inject recent context)');
+    console.log('   - save-hook.js (PostToolUse: record events)');
+    console.log('   - new-hook.js (UserPromptSubmit: smart semantic search)');
+    console.log('   Viewer:');
+    console.log('   - viewer-server.js (optional: browse history at localhost:37777)');
+    console.log('\n💡 Note: Run "npm run setup:model" to enable semantic search');
 
   } catch (error) {
     console.error('\n❌ Build failed:', error.message);
