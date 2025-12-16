@@ -17,7 +17,7 @@
     <img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg" alt="License">
   </a>
   <a href="package.json">
-    <img src="https://img.shields.io/badge/version-6.5.0-green.svg" alt="Version">
+    <img src="https://img.shields.io/badge/version-8.0.0-green.svg" alt="Version">
   </a>
   <a href="package.json">
     <img src="https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg" alt="Node">
@@ -67,15 +67,13 @@ Restart Claude Code. Context from previous sessions will automatically appear in
 
 **Key Features:**
 
-- 🧠 **Persistent Memory** - Context survives across sessions
-- 📊 **Progressive Disclosure** - Layered memory retrieval with token cost visibility
-- 🔍 **Skill-Based Search** - Query your project history with mem-search skill (~2,250 token savings)
-- 🖥️ **Web Viewer UI** - Real-time memory stream at http://localhost:37777
+- 🧠 **Persistent Memory** - Context survives across sessions via direct SQLite storage
+- 🔍 **Semantic Search** - sqlite-vec + sqlite-lembed for on-demand vector search
+- 🖥️ **Web Viewer UI** - Browse history at http://localhost:37777 (run `npm run viewer`)
 - 🔒 **Privacy Control** - Use `<private>` tags to exclude sensitive content from storage
-- ⚙️ **Context Configuration** - Fine-grained control over what context gets injected
-- 🤖 **Automatic Operation** - No manual intervention required
-- 🔗 **Citations** - Reference past decisions with `claude-mem://` URIs
-- 🧪 **Beta Channel** - Try experimental features like Endless Mode via version switching
+- 🤖 **Automatic Operation** - No manual intervention required, no daemon to manage
+- ⚡ **Lightweight** - No PM2, no Python, no external services - just SQLite
+- 🧹 **Deterministic** - No LLM on write path, fast synchronous storage
 
 ---
 
@@ -83,34 +81,17 @@ Restart Claude Code. Context from previous sessions will automatically appear in
 
 📚 **[View Full Documentation](docs/)** - Browse markdown docs on GitHub
 
-💻 **Local Preview**: Run Mintlify docs locally:
-
-```bash
-cd docs
-npx mintlify dev
-```
+> **Note**: Some documentation may reference the pre-v8.0 architecture. The current simplified architecture uses direct SQLite access with sqlite-vec for vector search.
 
 ### Getting Started
 
 - **[Installation Guide](https://docs.claude-mem.ai/installation)** - Quick start & advanced installation
 - **[Usage Guide](https://docs.claude-mem.ai/usage/getting-started)** - How Claude-Mem works automatically
-- **[Search Tools](https://docs.claude-mem.ai/usage/search-tools)** - Query your project history with natural language
-- **[Beta Features](https://docs.claude-mem.ai/beta-features)** - Try experimental features like Endless Mode
-
-### Best Practices
-
-- **[Context Engineering](https://docs.claude-mem.ai/context-engineering)** - AI agent context optimization principles
-- **[Progressive Disclosure](https://docs.claude-mem.ai/progressive-disclosure)** - Philosophy behind Claude-Mem's context priming strategy
 
 ### Architecture
 
-- **[Overview](https://docs.claude-mem.ai/architecture/overview)** - System components & data flow
-- **[Architecture Evolution](https://docs.claude-mem.ai/architecture-evolution)** - The journey from v3 to v5
 - **[Hooks Architecture](https://docs.claude-mem.ai/hooks-architecture)** - How Claude-Mem uses lifecycle hooks
-- **[Hooks Reference](https://docs.claude-mem.ai/architecture/hooks)** - 7 hook scripts explained
-- **[Worker Service](https://docs.claude-mem.ai/architecture/worker-service)** - HTTP API & PM2 management
-- **[Database](https://docs.claude-mem.ai/architecture/database)** - SQLite schema & FTS5 search
-- **[Search Architecture](https://docs.claude-mem.ai/architecture/search-architecture)** - Hybrid search with Chroma vector database
+- **[Database](https://docs.claude-mem.ai/architecture/database)** - SQLite schema & vector search
 
 ### Configuration & Development
 
@@ -124,135 +105,119 @@ npx mintlify dev
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Session Start → Inject recent observations as context      │
+│ Session Start → Inject recent tool events as context        │
+│                 (direct SQLite read)                        │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ User Prompts → Create session, save user prompts           │
+│ User Prompts → Semantic search if prompt references history │
+│                (sqlite-vec KNN search)                      │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ Tool Executions → Capture observations (Read, Write, etc.)  │
-└─────────────────────────────────────────────────────────────┘
-                            ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Worker Processes → Extract learnings via Claude Agent SDK   │
-└─────────────────────────────────────────────────────────────┘
-                            ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Session Ends → Generate summary, ready for next session     │
+│ Tool Executions → Record events synchronously               │
+│                   (deterministic metadata extraction)       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 **Core Components:**
 
-1. **5 Lifecycle Hooks** - SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd (6 hook scripts)
-2. **Smart Install** - Cached dependency checker (pre-hook script, not a lifecycle hook)
-3. **Worker Service** - HTTP API on port 37777 with web viewer UI and 10 search endpoints, managed by PM2
-4. **SQLite Database** - Stores sessions, observations, summaries with FTS5 full-text search
-5. **mem-search Skill** - Natural language queries with progressive disclosure (~2,250 token savings vs MCP)
-6. **Chroma Vector Database** - Hybrid semantic + keyword search for intelligent context retrieval
+1. **3 Lifecycle Hooks** - SessionStart, UserPromptSubmit, PostToolUse
+2. **SimpleMemory** - Core SQLite class with sqlite-vec for vector search
+3. **sqlite-lembed** - In-database embedding generation (no external services)
+4. **Optional Viewer** - Browse history at localhost:37777 (run manually)
 
-See [Architecture Overview](https://docs.claude-mem.ai/architecture/overview) for details.
+**Design Principles:**
+
+- Direct SQLite access (no daemon/worker process)
+- sqlite-vec for KNN vector search (no external vector DB)
+- sqlite-lembed for embeddings (no Python dependencies)
+- Deterministic extraction on write (no LLM in hot path)
+- On-demand embeddings (generated at search time, cached)
 
 ---
 
-## mem-search Skill
+## Semantic Search
 
-Claude-Mem provides intelligent search through the mem-search skill that auto-invokes when you ask about past work:
+The **UserPromptSubmit** hook automatically detects when you're asking about past work and injects relevant context:
+
+**Trigger Patterns:**
+- "What did we do last time?"
+- "Did we fix this bug before?"
+- "How did we implement authentication?"
+- "What changes were made to X?"
 
 **How It Works:**
-- Just ask naturally: *"What did we do last session?"* or *"Did we fix this bug before?"*
-- Claude automatically invokes the mem-search skill to find relevant context
-- ~2,250 token savings per session start vs MCP approach
+1. Hook detects history-related keywords in your prompt
+2. Generates embedding for your query using sqlite-lembed
+3. Performs KNN search against cached event embeddings
+4. Injects top matching events as context
 
-**Available Search Operations:**
-
-1. **Search Observations** - Full-text search across observations
-2. **Search Sessions** - Full-text search across session summaries
-3. **Search Prompts** - Search raw user requests
-4. **By Concept** - Find by concept tags (discovery, problem-solution, pattern, etc.)
-5. **By File** - Find observations referencing specific files
-6. **By Type** - Find by type (decision, bugfix, feature, refactor, discovery, change)
-7. **Recent Context** - Get recent session context for a project
-8. **Timeline** - Get unified timeline of context around a specific point in time
-9. **Timeline by Query** - Search for observations and get timeline context around best match
-10. **API Help** - Get search API documentation
-
-**Example Natural Language Queries:**
-
-```
-"What bugs did we fix last session?"
-"How did we implement authentication?"
-"What changes were made to worker-service.ts?"
-"Show me recent work on this project"
-"What was happening when we added the viewer UI?"
+**Setup Semantic Search:**
+```bash
+npm run setup:model  # Download ~24MB embedding model
 ```
 
-See [Search Tools Guide](https://docs.claude-mem.ai/usage/search-tools) for detailed examples.
+Without the model, search falls back to LIKE-based text matching.
 
 ---
 
-## Beta Features & Endless Mode
+## Preload Knowledge
 
-Claude-Mem offers a **beta channel** with experimental features. Switch between stable and beta versions directly from the web viewer UI.
-
-### How to Try Beta
-
-1. Open http://localhost:37777
-2. Click Settings (gear icon)
-3. In **Version Channel**, click "Try Beta (Endless Mode)"
-4. Wait for the worker to restart
-
-Your memory data is preserved when switching versions.
-
-### Endless Mode (Beta)
-
-The flagship beta feature is **Endless Mode** - a biomimetic memory architecture that dramatically extends session length:
-
-**The Problem**: Standard Claude Code sessions hit context limits after ~50 tool uses. Each tool adds 1-10k+ tokens, and Claude re-synthesizes all previous outputs on every response (O(N²) complexity).
-
-**The Solution**: Endless Mode compresses tool outputs into ~500-token observations and transforms the transcript in real-time:
+Seed Claude with project-specific knowledge that persists and is searchable:
 
 ```
-Working Memory (Context):     Compressed observations (~500 tokens each)
-Archive Memory (Disk):        Full tool outputs preserved for recall
+project/
+├── .claude-mem/
+│   └── preload/
+│       ├── architecture.md      # System design, patterns
+│       ├── api-conventions.md   # API guidelines
+│       └── decisions/           # Subdirectory = category
+│           ├── database.md      # Why we chose Postgres
+│           └── auth.md          # Authentication approach
 ```
 
-**Expected Results**:
-- ~95% token reduction in context window
-- ~20x more tool uses before context exhaustion
-- Linear O(N) scaling instead of quadratic O(N²)
-- Full transcripts preserved for perfect recall
+**How it works:**
+1. Create `.claude-mem/preload/` in your project root
+2. Add markdown files with knowledge you want Claude to know
+3. On next session, files are **indexed** (not auto-injected into context)
+4. Ask a relevant question → semantic search finds matching preloaded content
+5. Changes detected via hash - only modified files re-import
 
-**Caveats**: Adds latency (60-90s per tool for observation generation), still experimental.
+**Use cases:**
+- Architecture decisions and rationale
+- API conventions and patterns
+- Domain-specific terminology
+- Onboarding context for the codebase
+- Historical decisions ("why did we choose X?")
 
-See [Beta Features Documentation](https://docs.claude-mem.ai/beta-features) for details.
+**File format:**
+```markdown
+# Database Choice
+
+We chose PostgreSQL over MongoDB because:
+- Strong ACID compliance needed for financial data
+- Complex queries with joins
+- Better tooling ecosystem
+```
+
+Files with `# Title` headings use that as the title. Subdirectories become categories (shown as `[Decisions] Database Choice`).
 
 ---
 
 ## What's New
 
-**v6.4.9 - Context Configuration Settings:**
-- 11 new settings for fine-grained control over context injection
-- Configure token economics display, observation filtering by type/concept
-- Control number of observations and which fields to display
+**v8.0.0 - Simplified Architecture:**
+- **Removed daemon** - No more PM2 worker process to manage
+- **Direct SQLite access** - Hooks read/write database directly
+- **sqlite-vec + sqlite-lembed** - In-database vector search, no external services
+- **Deterministic extraction** - No LLM on write path, fast synchronous storage
+- **3 hooks** - SessionStart, UserPromptSubmit, PostToolUse
+- **Optional viewer** - Run `npm run viewer` to browse history
 
 **v6.4.0 - Dual-Tag Privacy System:**
 - `<private>` tags for user-controlled privacy - wrap sensitive content to exclude from storage
 - System-level `<claude-mem-context>` tags prevent recursive observation storage
-- Edge processing ensures private content never reaches database
-
-**v6.3.0 - Version Channel:**
-- Switch between stable and beta versions from the web viewer UI
-- Try experimental features like Endless Mode without manual git operations
-
-**Previous Highlights:**
-- **v6.0.0**: Major session management & transcript processing improvements
-- **v5.5.0**: mem-search skill enhancement with 100% effectiveness rate
-- **v5.4.0**: Skill-based search architecture (~2,250 tokens saved per session)
-- **v5.1.0**: Web-based viewer UI with real-time updates
-- **v5.0.0**: Hybrid search with Chroma vector database
 
 See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
@@ -262,21 +227,11 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
 - **Node.js**: 18.0.0 or higher
 - **Claude Code**: Latest version with plugin support
-- **PM2**: Process manager (bundled - no global install required)
-- **SQLite 3**: For persistent storage (bundled)
+- **SQLite 3**: For persistent storage (bundled via better-sqlite3)
 
 ---
 
 ## Key Benefits
-
-### Progressive Disclosure Context
-
-- **Layered memory retrieval** mirrors human memory patterns
-- **Layer 1 (Index)**: See what observations exist with token costs at session start
-- **Layer 2 (Details)**: Fetch full narratives on-demand via MCP search
-- **Layer 3 (Perfect Recall)**: Access source code and original transcripts
-- **Smart decision-making**: Token counts help Claude choose between fetching details or reading code
-- **Type indicators**: Visual cues (🔴 critical, 🟤 decision, 🔵 informational) highlight observation importance
 
 ### Automatic Memory
 
@@ -284,23 +239,23 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 - No manual commands or configuration needed
 - Works transparently in the background
 
-### Full History Search
+### Semantic Search
 
-- Search across all sessions and observations
-- FTS5 full-text search for fast queries
-- Citations link back to specific observations
+- Vector-based search using sqlite-vec
+- On-demand embedding generation via sqlite-lembed
+- Falls back to text search if model not installed
 
-### Structured Observations
+### Structured Events
 
-- AI-powered extraction of learnings
-- Categorized by type (decision, bugfix, feature, etc.)
-- Tagged with concepts and file references
+- Deterministic metadata extraction (no LLM latency)
+- Categorized by type (read, write, exec, search, other)
+- Files touched tracked automatically
 
-### Multi-Prompt Sessions
+### Privacy Control
 
-- Sessions span multiple user prompts
-- Context preserved across `/clear` commands
-- Track entire conversation threads
+- `<private>` tags exclude sensitive content from storage
+- `<claude-mem-context>` tags prevent recursive storage
+- Tag stripping happens at hook layer before database
 
 ---
 
@@ -312,38 +267,27 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `CLAUDE_MEM_MODEL` | `claude-haiku-4-5` | AI model for observations |
-| `CLAUDE_MEM_WORKER_PORT` | `37777` | Worker service port |
 | `CLAUDE_MEM_DATA_DIR` | `~/.claude-mem` | Data directory location |
-| `CLAUDE_MEM_LOG_LEVEL` | `INFO` | Log verbosity (DEBUG, INFO, WARN, ERROR, SILENT) |
-| `CLAUDE_MEM_PYTHON_VERSION` | `3.13` | Python version for chroma-mcp |
-| `CLAUDE_CODE_PATH` | _(auto-detect)_ | Path to Claude executable |
-| `CLAUDE_MEM_CONTEXT_OBSERVATIONS` | `50` | Number of observations to inject at SessionStart |
-
-**Settings Management:**
-
-```bash
-# Edit settings via CLI helper
-./claude-mem-settings.sh
-
-# Or edit directly
-nano ~/.claude-mem/settings.json
-
-# View current settings
-curl http://localhost:37777/api/settings
-```
+| `CLAUDE_MEM_CONTEXT_OBSERVATIONS` | `50` | Number of events to inject at SessionStart |
+| `CLAUDE_MEM_VIEWER_PORT` | `37777` | Port for optional viewer server |
 
 **Settings File Format:**
 
 ```json
 {
-  "CLAUDE_MEM_MODEL": "claude-haiku-4-5",
-  "CLAUDE_MEM_WORKER_PORT": "37777",
-  "CLAUDE_MEM_CONTEXT_OBSERVATIONS": "50"
+  "CLAUDE_MEM_DATA_DIR": "~/.claude-mem",
+  "CLAUDE_MEM_CONTEXT_OBSERVATIONS": 50,
+  "CLAUDE_MEM_VIEWER_PORT": 37777
 }
 ```
 
-See [Configuration Guide](https://docs.claude-mem.ai/configuration) for details.
+**File Locations:**
+
+| Path | Description |
+|------|-------------|
+| `~/.claude-mem/simple-memory.db` | SQLite database with tool events |
+| `~/.claude-mem/models/all-MiniLM-L6-v2.gguf` | Embedding model (optional, ~24MB) |
+| `~/.claude-mem/settings.json` | Configuration file |
 
 ---
 
@@ -358,12 +302,15 @@ npm run build
 
 # Run tests
 npm test
+npm run test:memory    # Test SimpleMemory class
+npm run test:context   # Test context hook
 
-# Start worker
-npm run worker:start
+# Deploy to Claude Code
+npm run sync-marketplace
 
-# View logs
-npm run worker:logs
+# Optional: Start viewer UI
+npm run viewer
+npm run setup:model    # Download embedding model for semantic search
 ```
 
 See [Development Guide](https://docs.claude-mem.ai/development) for detailed instructions.
@@ -372,18 +319,21 @@ See [Development Guide](https://docs.claude-mem.ai/development) for detailed ins
 
 ## Troubleshooting
 
-**Quick Diagnostic:**
-
-If you're experiencing issues, describe the problem to Claude and the troubleshoot skill will automatically activate to diagnose and provide fixes.
-
 **Common Issues:**
 
-- Worker not starting → `npm run worker:restart`
-- No context appearing → `npm run test:context`
-- Database issues → `sqlite3 ~/.claude-mem/claude-mem.db "PRAGMA integrity_check;"`
-- Search not working → Check FTS5 tables exist
+- **No context appearing** → Run `npm run test:context` to verify hook works
+- **Database issues** → `sqlite3 ~/.claude-mem/simple-memory.db "PRAGMA integrity_check;"`
+- **Semantic search not working** → Run `npm run setup:model` to download embedding model
+- **Viewer not starting** → Check port 37777 is available
 
-See [Troubleshooting Guide](https://docs.claude-mem.ai/troubleshooting) for complete solutions.
+**Reset Database:**
+
+```bash
+rm ~/.claude-mem/simple-memory.db
+# Database will be recreated on next session
+```
+
+See [Troubleshooting Guide](https://docs.claude-mem.ai/troubleshooting) for more solutions.
 
 ---
 
@@ -427,4 +377,4 @@ See the [LICENSE](LICENSE) file for full details.
 
 ---
 
-**Built with Claude Agent SDK** | **Powered by Claude Code** | **Made with TypeScript**
+**Powered by Claude Code** | **Made with TypeScript** | **sqlite-vec + sqlite-lembed**

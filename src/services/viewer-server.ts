@@ -246,6 +246,115 @@ function createApp(): express.Application {
     }
   });
 
+  // ===================
+  // Preload Management
+  // ===================
+
+  // List all preloads (optionally filtered by project)
+  app.get('/api/preloads', (req, res) => {
+    try {
+      const memory = getSimpleMemory();
+      const project = req.query.project as string | undefined;
+      const preloads = memory.getAllPreloads(project);
+      res.json({ items: preloads, total: preloads.length });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get a single preload by ID
+  app.get('/api/preloads/:id', (req, res) => {
+    try {
+      const memory = getSimpleMemory();
+      const id = parseInt(req.params.id);
+      const preload = memory.getPreloadById(id);
+      if (!preload) {
+        return res.status(404).json({ error: 'Preload not found' });
+      }
+      res.json(preload);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Create a new preload
+  app.post('/api/preloads', (req, res) => {
+    try {
+      const memory = getSimpleMemory();
+      const { project, title, category, content } = req.body;
+
+      if (!project || !title || !content) {
+        return res.status(400).json({ error: 'Missing required fields: project, title, content' });
+      }
+
+      const id = memory.createPreload(project, title, category || null, content);
+      const preload = memory.getPreloadById(id);
+
+      // Broadcast to SSE clients
+      broadcastEvent('preload_created', { preload });
+
+      res.status(201).json(preload);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Update a preload
+  app.put('/api/preloads/:id', (req, res) => {
+    try {
+      const memory = getSimpleMemory();
+      const id = parseInt(req.params.id);
+      const { title, category, content } = req.body;
+
+      const existing = memory.getPreloadById(id);
+      if (!existing) {
+        return res.status(404).json({ error: 'Preload not found' });
+      }
+
+      // Don't allow editing file-based preloads
+      if (existing.source === 'file') {
+        return res.status(400).json({ error: 'Cannot edit file-based preloads. Edit the source file instead.' });
+      }
+
+      memory.updatePreload(id, title, category || null, content);
+      const preload = memory.getPreloadById(id);
+
+      // Broadcast to SSE clients
+      broadcastEvent('preload_updated', { preload });
+
+      res.json(preload);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Delete a preload
+  app.delete('/api/preloads/:id', (req, res) => {
+    try {
+      const memory = getSimpleMemory();
+      const id = parseInt(req.params.id);
+
+      const existing = memory.getPreloadById(id);
+      if (!existing) {
+        return res.status(404).json({ error: 'Preload not found' });
+      }
+
+      // Don't allow deleting file-based preloads
+      if (existing.source === 'file') {
+        return res.status(400).json({ error: 'Cannot delete file-based preloads. Delete the source file instead.' });
+      }
+
+      memory.deletePreload(id);
+
+      // Broadcast to SSE clients
+      broadcastEvent('preload_deleted', { id });
+
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Serve viewer UI
   const viewerPath = join(PLUGIN_DIR, 'ui', 'viewer.html');
   app.get('/', (req, res) => {
@@ -271,8 +380,8 @@ function createApp(): express.Application {
     }
   });
 
-  // Serve static files from plugin/ui
-  app.use('/ui', express.static(join(PLUGIN_DIR, 'ui')));
+  // Serve static files from plugin/ui at root path
+  app.use(express.static(join(PLUGIN_DIR, 'ui')));
 
   return app;
 }

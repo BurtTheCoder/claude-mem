@@ -197,6 +197,32 @@ export class SimpleMemory {
         FOREIGN KEY(event_id) REFERENCES tool_events(id) ON DELETE CASCADE
       );
     `);
+
+    // Preload tracking table
+    // source: 'file' for filesystem-based, 'ui' for UI-created
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS preload_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_hash TEXT NOT NULL,
+        title TEXT,
+        category TEXT,
+        event_id INTEGER,
+        imported_at INTEGER NOT NULL,
+        source TEXT DEFAULT 'file',
+        UNIQUE(project, file_path),
+        FOREIGN KEY(event_id) REFERENCES tool_events(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_preload_project ON preload_files(project);
+    `);
+
+    // Add source column if it doesn't exist (migration for existing DBs)
+    try {
+      this.db.exec(`ALTER TABLE preload_files ADD COLUMN source TEXT DEFAULT 'file'`);
+    } catch {
+      // Column already exists
+    }
   }
 
   /**
@@ -310,6 +336,7 @@ export class SimpleMemory {
     const stmt = this.db.prepare(`
       SELECT * FROM tool_events
       WHERE project = ?
+        AND (event_type IS NULL OR event_type != 'preload')
       ORDER BY created_at DESC
       LIMIT ?
     `);
@@ -668,6 +695,346 @@ export class SimpleMemory {
     }
 
     return lines.join('\n');
+  }
+
+  // ===================
+  // Preload Management
+  // ===================
+
+  /**
+   * Get existing preload files for a project
+   */
+  getPreloadFiles(project: string): Array<{ path: string; hash: string; event_id: number | null }> {
+    const stmt = this.db.prepare(`
+      SELECT file_path as path, file_hash as hash, event_id
+      FROM preload_files
+      WHERE project = ?
+    `);
+    return stmt.all(project) as Array<{ path: string; hash: string; event_id: number | null }>;
+  }
+
+  /**
+   * Import a preload file as a tool event
+   */
+  importPreloadFile(
+    project: string,
+    filePath: string,
+    fileHash: string,
+    title: string,
+    category: string | undefined,
+    content: string
+  ): number {
+    // Create the tool event
+    const eventStmt = this.db.prepare(`
+      INSERT INTO tool_events (
+        session_id, project, tool_name, tool_input, tool_output,
+        cwd, created_at, files_touched, event_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const metadata = JSON.stringify({
+      source: 'preload',
+      path: filePath,
+      title,
+      category: category || null,
+    });
+
+    const result = eventStmt.run(
+      `preload-${project}`,
+      project,
+      'PreloadedKnowledge',
+      metadata,
+      content,
+      '',
+      Date.now(),
+      JSON.stringify([filePath]),
+      'preload'
+    );
+
+    const eventId = Number(result.lastInsertRowid);
+
+    // Track the preload file
+    const preloadStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO preload_files (
+        project, file_path, file_hash, title, category, event_id, imported_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    preloadStmt.run(project, filePath, fileHash, title, category || null, eventId, Date.now());
+
+    return eventId;
+  }
+
+  /**
+   * Update an existing preload file
+   */
+  updatePreloadFile(
+    project: string,
+    filePath: string,
+    fileHash: string,
+    title: string,
+    category: string | undefined,
+    content: string,
+    existingEventId: number | null
+  ): number {
+    // Delete old event if exists
+    if (existingEventId) {
+      this.db.prepare('DELETE FROM tool_events WHERE id = ?').run(existingEventId);
+      this.db.prepare('DELETE FROM event_embeddings WHERE event_id = ?').run(existingEventId);
+      this.db.prepare('DELETE FROM embedding_cache WHERE event_id = ?').run(existingEventId);
+    }
+
+    // Import as new
+    return this.importPreloadFile(project, filePath, fileHash, title, category, content);
+  }
+
+  /**
+   * Remove preload files that no longer exist
+   */
+  removeStalePreloadFiles(project: string, currentPaths: string[]): number {
+    const existing = this.getPreloadFiles(project);
+    const currentSet = new Set(currentPaths);
+    let removed = 0;
+
+    for (const file of existing) {
+      if (!currentSet.has(file.path)) {
+        // Remove the event
+        if (file.event_id) {
+          this.db.prepare('DELETE FROM tool_events WHERE id = ?').run(file.event_id);
+          this.db.prepare('DELETE FROM event_embeddings WHERE event_id = ?').run(file.event_id);
+          this.db.prepare('DELETE FROM embedding_cache WHERE event_id = ?').run(file.event_id);
+        }
+        // Remove the tracking record
+        this.db.prepare('DELETE FROM preload_files WHERE project = ? AND file_path = ?').run(project, file.path);
+        removed++;
+      }
+    }
+
+    return removed;
+  }
+
+  /**
+   * Get preload events for context injection
+   */
+  getPreloadEvents(project: string): ToolEvent[] {
+    const stmt = this.db.prepare(`
+      SELECT t.* FROM tool_events t
+      JOIN preload_files p ON p.event_id = t.id
+      WHERE p.project = ?
+      ORDER BY t.created_at DESC
+    `);
+
+    const rows = stmt.all(project) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      session_id: row.session_id,
+      project: row.project,
+      tool_name: row.tool_name,
+      tool_input: row.tool_input,
+      tool_output: row.tool_output,
+      cwd: row.cwd,
+      created_at: row.created_at,
+      files_touched: row.files_touched ? JSON.parse(row.files_touched) : undefined,
+      event_type: row.event_type
+    }));
+  }
+
+  // ===================
+  // Preload CRUD (for UI)
+  // ===================
+
+  /**
+   * Get all preloads, optionally filtered by project
+   */
+  getAllPreloads(project?: string): Array<{
+    id: number;
+    project: string;
+    file_path: string;
+    title: string | null;
+    category: string | null;
+    source: string;
+    imported_at: number;
+    content_preview: string;
+  }> {
+    const query = project
+      ? `SELECT p.*, SUBSTR(t.tool_output, 1, 200) as content_preview
+         FROM preload_files p
+         LEFT JOIN tool_events t ON t.id = p.event_id
+         WHERE p.project = ?
+         ORDER BY p.imported_at DESC`
+      : `SELECT p.*, SUBSTR(t.tool_output, 1, 200) as content_preview
+         FROM preload_files p
+         LEFT JOIN tool_events t ON t.id = p.event_id
+         ORDER BY p.imported_at DESC`;
+
+    const stmt = this.db.prepare(query);
+    const rows = project ? stmt.all(project) : stmt.all();
+
+    return (rows as any[]).map(row => ({
+      id: row.id,
+      project: row.project,
+      file_path: row.file_path,
+      title: row.title,
+      category: row.category,
+      source: row.source || 'file',
+      imported_at: row.imported_at,
+      content_preview: row.content_preview || '',
+    }));
+  }
+
+  /**
+   * Get a single preload by ID with full content
+   */
+  getPreloadById(id: number): {
+    id: number;
+    project: string;
+    file_path: string;
+    title: string | null;
+    category: string | null;
+    source: string;
+    imported_at: number;
+    content: string;
+  } | null {
+    const stmt = this.db.prepare(`
+      SELECT p.*, t.tool_output as content
+      FROM preload_files p
+      LEFT JOIN tool_events t ON t.id = p.event_id
+      WHERE p.id = ?
+    `);
+
+    const row = stmt.get(id) as any;
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      project: row.project,
+      file_path: row.file_path,
+      title: row.title,
+      category: row.category,
+      source: row.source || 'file',
+      imported_at: row.imported_at,
+      content: row.content || '',
+    };
+  }
+
+  /**
+   * Create a new preload (UI-based, not from file)
+   */
+  createPreload(project: string, title: string, category: string | null, content: string): number {
+    const hash = createHash('md5').update(content).digest('hex');
+    const filePath = `ui:${title.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+    const sessionId = `preload-${project}`;
+
+    // Ensure session exists for preloads (required for foreign key)
+    this.startSession(sessionId, project, 'Preloaded Knowledge');
+
+    // Create the tool event
+    const eventStmt = this.db.prepare(`
+      INSERT INTO tool_events (
+        session_id, project, tool_name, tool_input, tool_output,
+        cwd, created_at, files_touched, event_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const metadata = JSON.stringify({
+      source: 'ui',
+      path: filePath,
+      title,
+      category,
+    });
+
+    const result = eventStmt.run(
+      sessionId,
+      project,
+      'PreloadedKnowledge',
+      metadata,
+      content,
+      '',
+      Date.now(),
+      JSON.stringify([filePath]),
+      'preload'
+    );
+
+    const eventId = Number(result.lastInsertRowid);
+
+    // Track the preload file
+    const preloadStmt = this.db.prepare(`
+      INSERT INTO preload_files (
+        project, file_path, file_hash, title, category, event_id, imported_at, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ui')
+    `);
+
+    const preloadResult = preloadStmt.run(project, filePath, hash, title, category, eventId, Date.now());
+
+    return Number(preloadResult.lastInsertRowid);
+  }
+
+  /**
+   * Update an existing preload (UI-based only)
+   */
+  updatePreload(id: number, title: string, category: string | null, content: string): void {
+    const preload = this.getPreloadById(id);
+    if (!preload) throw new Error('Preload not found');
+    if (preload.source === 'file') throw new Error('Cannot update file-based preloads');
+
+    const hash = createHash('md5').update(content).digest('hex');
+
+    // Update the tool event
+    const eventStmt = this.db.prepare(`
+      UPDATE tool_events
+      SET tool_input = ?, tool_output = ?, created_at = ?
+      WHERE id = (SELECT event_id FROM preload_files WHERE id = ?)
+    `);
+
+    const metadata = JSON.stringify({
+      source: 'ui',
+      path: preload.file_path,
+      title,
+      category,
+    });
+
+    eventStmt.run(metadata, content, Date.now(), id);
+
+    // Update preload tracking
+    const preloadStmt = this.db.prepare(`
+      UPDATE preload_files
+      SET title = ?, category = ?, file_hash = ?, imported_at = ?
+      WHERE id = ?
+    `);
+
+    preloadStmt.run(title, category, hash, Date.now(), id);
+
+    // Invalidate embedding cache for this event
+    const eventIdStmt = this.db.prepare('SELECT event_id FROM preload_files WHERE id = ?');
+    const result = eventIdStmt.get(id) as { event_id: number } | undefined;
+    if (result?.event_id) {
+      this.db.prepare('DELETE FROM embedding_cache WHERE event_id = ?').run(result.event_id);
+      this.db.prepare('DELETE FROM event_embeddings WHERE event_id = ?').run(result.event_id);
+    }
+  }
+
+  /**
+   * Delete a preload (UI-based only)
+   */
+  deletePreload(id: number): void {
+    const preload = this.getPreloadById(id);
+    if (!preload) throw new Error('Preload not found');
+    if (preload.source === 'file') throw new Error('Cannot delete file-based preloads');
+
+    // Get event ID before deletion
+    const eventIdStmt = this.db.prepare('SELECT event_id FROM preload_files WHERE id = ?');
+    const result = eventIdStmt.get(id) as { event_id: number } | undefined;
+
+    if (result?.event_id) {
+      // Delete event and related data
+      this.db.prepare('DELETE FROM tool_events WHERE id = ?').run(result.event_id);
+      this.db.prepare('DELETE FROM embedding_cache WHERE event_id = ?').run(result.event_id);
+      this.db.prepare('DELETE FROM event_embeddings WHERE event_id = ?').run(result.event_id);
+    }
+
+    // Delete preload tracking
+    this.db.prepare('DELETE FROM preload_files WHERE id = ?').run(id);
   }
 
   /**

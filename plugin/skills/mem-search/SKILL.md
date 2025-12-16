@@ -1,143 +1,76 @@
 ---
 name: mem-search
-description: Search claude-mem's persistent cross-session memory database. Use when user asks "did we already solve this?", "how did we do X last time?", or needs work from previous sessions.
+description: Memory search is automatic - just ask about past work or preloaded knowledge naturally.
 ---
 
 # Memory Search
 
-Search past work across all sessions. Simple workflow: search → get IDs → fetch details by ID.
+**Search is automatic.** The UserPromptSubmit hook detects history-related prompts and injects relevant context.
 
-## When to Use
+## Just Ask Naturally
 
-Use when users ask about PREVIOUS sessions (not current conversation):
-- "Did we already fix this?"
-- "How did we solve X last time?"
-- "What happened last week?"
+The hook recognizes patterns like:
+- "What did we do last session?"
+- "Did we fix this bug before?"
+- "How did we implement X last time?"
+- "What changes were made to this file?"
+- "Why did we choose Postgres?" (finds preloaded decisions)
 
-## The Workflow
+When detected, it performs semantic search (if model installed) or text search and injects matching events as context.
 
-**ALWAYS follow this exact flow:**
+## How It Works
 
-1. **Search** - Get an index of results with IDs
-2. **Timeline** (optional) - Get context around top results to understand what was happening
-3. **Review** - Look at titles/dates/context, pick relevant IDs
-4. **Fetch** - Get full details ONLY for those IDs
+1. **SessionStart** - Recent events injected, preload files indexed
+2. **UserPromptSubmit** - History queries trigger semantic search (includes preloaded knowledge)
+3. **PostToolUse** - All tool executions recorded for future sessions
 
-### Step 1: Search Everything
+## Preloaded Knowledge
+
+Projects can include searchable documentation in `.claude-mem/preload/`:
+
+```
+project/
+├── .claude-mem/
+│   └── preload/
+│       ├── architecture.md     # System design
+│       ├── conventions.md      # Code conventions
+│       └── decisions/          # Subdirs = categories
+│           └── database.md     # Why we chose X
+```
+
+This content is:
+- **Indexed** on session start (not auto-injected into context)
+- Found via semantic search when you ask relevant questions
+- Re-imported when files change (hash-based detection)
+
+## Setup Semantic Search
+
+For better search results, install the embedding model:
 
 ```bash
-curl "http://localhost:37777/api/search?query=authentication&format=index&limit=5"
+npm run setup:model  # Downloads ~24MB model
 ```
 
-**Required parameters:**
-- `query` - Search term
-- `format=index` - ALWAYS start with index (lightweight)
-- `limit=5` - Start small (3-5 results)
+Without it, search falls back to LIKE-based text matching.
 
-**Returns:**
-```
-1. [feature] Added JWT authentication
-   Date: 11/17/2025, 3:48:45 PM
-   ID: 11131
+## Manual Browsing
 
-2. [bugfix] Fixed auth token expiration
-   Date: 11/16/2025, 2:15:22 PM
-   ID: 10942
-```
-
-### Step 2: Get Timeline Context (Optional)
-
-When you need to understand "what was happening" around a result:
+To browse history manually, start the viewer:
 
 ```bash
-# Get timeline around an observation ID
-curl "http://localhost:37777/api/timeline?anchor=11131&depth_before=3&depth_after=3"
-
-# Or use query to find + get timeline in one step
-curl "http://localhost:37777/api/timeline?query=authentication&depth_before=3&depth_after=3"
+npm run viewer  # Opens http://localhost:37777
 ```
 
-**Returns exactly `depth_before + 1 + depth_after` items** - observations, sessions, and prompts interleaved chronologically around the anchor.
+The viewer provides:
+- `/api/observations` - Recent tool events
+- `/api/search?q=query` - Search events
+- `/api/projects` - List of projects
+- `/api/stats` - Database statistics
 
-**When to use:**
-- User asks "what was happening when..."
-- Need to understand sequence of events
-- Want broader context around a specific observation
+## Privacy
 
-### Step 3: Pick IDs
+Wrap sensitive content with `<private>` tags to exclude from storage:
 
-Review the index results (and timeline if used). Identify which IDs are actually relevant. Discard the rest.
-
-### Step 4: Fetch by ID
-
-For each relevant ID, fetch full details:
-
-```bash
-# Fetch observation
-curl "http://localhost:37777/api/observation/11131"
-
-# Fetch session
-curl "http://localhost:37777/api/session/2005"
-
-# Fetch prompt
-curl "http://localhost:37777/api/prompt/5421"
 ```
-
-**ID formats:**
-- Observations: Just the number (11131)
-- Sessions: Just the number (2005) from "S2005"
-- Prompts: Just the number (5421)
-
-## Search Parameters
-
-**Basic:**
-- `query` - What to search for (required)
-- `format` - "index" or "full" (always use "index" first)
-- `limit` - How many results (default 5, max 100)
-
-**Filters (optional):**
-- `type` - Filter to "observations", "sessions", or "prompts"
-- `project` - Filter by project name
-- `dateStart` - Start date (YYYY-MM-DD or epoch timestamp)
-- `dateEnd` - End date (YYYY-MM-DD or epoch timestamp)
-- `obs_type` - Filter observations by type (comma-separated): bugfix, feature, decision, discovery, change
-
-## Examples
-
-**Find recent bug fixes:**
-```bash
-curl "http://localhost:37777/api/search?query=bug&type=observations&obs_type=bugfix&format=index&limit=5"
+<private>my secret API key</private>
 ```
-
-**Find what happened last week:**
-```bash
-curl "http://localhost:37777/api/search?query=&type=observations&dateStart=2025-11-11&format=index&limit=10"
-```
-
-**Search everything:**
-```bash
-curl "http://localhost:37777/api/search?query=database+migration&format=index&limit=5"
-```
-
-## Why This Workflow?
-
-**Token efficiency:**
-- Index format: ~50-100 tokens per result
-- Full format: ~500-1000 tokens per result
-- **10x difference** - only fetch full when you know it's relevant
-
-**Clarity:**
-- See everything first
-- Pick what matters
-- Get details only for what you need
-
-## Error Handling
-
-If search fails, tell the user the worker isn't available and suggest:
-```bash
-pm2 list  # Check if worker is running
-```
-
----
-
-**Remember:** ALWAYS search with format=index first. ALWAYS fetch by ID for details. The IDs are there for a reason - USE THEM.

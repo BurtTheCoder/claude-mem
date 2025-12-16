@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Header } from './components/Header';
 import { Feed } from './components/Feed';
 import { ContextSettingsModal } from './components/ContextSettingsModal';
+import { PreloadManager } from './components/PreloadManager';
 import { useSSE } from './hooks/useSSE';
 import { useSettings } from './hooks/useSettings';
 import { useStats } from './hooks/useStats';
@@ -13,6 +14,7 @@ import { mergeAndDeduplicateByProject } from './utils/data';
 export function App() {
   const [currentFilter, setCurrentFilter] = useState('');
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
+  const [preloadManagerOpen, setPreloadManagerOpen] = useState(false);
   const [paginatedObservations, setPaginatedObservations] = useState<Observation[]>([]);
   const [paginatedSummaries, setPaginatedSummaries] = useState<Summary[]>([]);
   const [paginatedPrompts, setPaginatedPrompts] = useState<UserPrompt[]>([]);
@@ -51,6 +53,11 @@ export function App() {
   // Toggle context preview modal
   const toggleContextPreview = useCallback(() => {
     setContextPreviewOpen(prev => !prev);
+  }, []);
+
+  // Toggle preload manager modal
+  const togglePreloadManager = useCallback(() => {
+    setPreloadManagerOpen(prev => !prev);
   }, []);
 
   // Handle loading more data
@@ -97,6 +104,7 @@ export function App() {
         themePreference={preference}
         onThemeChange={setThemePreference}
         onContextPreviewToggle={toggleContextPreview}
+        onPreloadManagerToggle={togglePreloadManager}
       />
 
       <Feed
@@ -115,6 +123,13 @@ export function App() {
         onSave={saveSettings}
         isSaving={isSaving}
         saveStatus={saveStatus}
+      />
+
+      <PreloadManager
+        isOpen={preloadManagerOpen}
+        onClose={togglePreloadManager}
+        projects={projects}
+        currentProject={currentFilter}
       />
     </>
   );
