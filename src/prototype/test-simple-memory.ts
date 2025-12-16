@@ -16,7 +16,7 @@ async function runTests(): Promise<void> {
   console.log(`Using temp dir: ${tempDir}`);
 
   try {
-    const memory = new SimpleMemory(tempDir);
+    const memory = new SimpleMemory({ dataDir: tempDir });
 
     // Test 1: Start session
     console.log('\n--- Test 1: Start session ---');
@@ -69,10 +69,27 @@ async function runTests(): Promise<void> {
       files: e.files_touched
     })));
 
-    // Test 4: Text search
+    // Test 4: Text search (with semantic disabled)
     console.log('\n--- Test 4: Text search ---');
-    const searchResults = await memory.searchEvents('npm test');
+    const searchResults = memory.searchEvents('npm test', { semantic: false });
     console.log(`✓ Found ${searchResults.length} results for "npm test"`);
+
+    // Test 4b: Semantic search check
+    console.log('\n--- Test 4b: Semantic search availability ---');
+    console.log(`✓ Semantic search available: ${memory.isSemanticSearchAvailable()}`);
+    if (memory.isSemanticSearchAvailable()) {
+      console.log('Testing semantic search...');
+      const semanticResults = memory.searchEvents('running tests', { semantic: true });
+      console.log(`✓ Semantic search returned ${semanticResults.length} results`);
+      if (semanticResults.length > 0) {
+        console.log('First result distance:', semanticResults[0].distance);
+      }
+    } else {
+      console.log('⚠ Semantic search not available (model not found)');
+      console.log('  To enable, download the model:');
+      console.log('  curl -L -o ~/.claude-mem/models/all-MiniLM-L6-v2.gguf \\');
+      console.log('    https://huggingface.co/asg017/sqlite-lembed-model-examples/resolve/main/all-MiniLM-L6-v2/all-MiniLM-L6-v2.e4ce9877.q8_0.gguf');
+    }
 
     // Test 5: Format context
     console.log('\n--- Test 5: Format context ---');

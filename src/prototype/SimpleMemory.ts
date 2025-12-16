@@ -4,23 +4,32 @@
  * Key differences from current architecture:
  * - Direct SQLite access (no HTTP worker)
  * - sqlite-vec for vector search (no Chroma MCP)
+ * - sqlite-lembed for in-database embeddings (no external embedding service)
  * - Deterministic extraction (no LLM on write path)
  * - On-demand embeddings (generated at search time, cached)
  *
  * This is a single-file database that handles:
  * - Tool event storage (raw, no LLM processing)
  * - Session tracking
- * - Vector search via sqlite-vec
+ * - Vector search via sqlite-vec + sqlite-lembed
  */
 
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
+import * as sqliteLembed from 'sqlite-lembed';
 import { homedir } from 'os';
 import { join } from 'path';
 import { mkdirSync, existsSync } from 'fs';
+import { createHash } from 'crypto';
 
-// Embedding dimension (using 384 for sentence-transformers compatibility)
+// Embedding dimension (all-MiniLM-L6-v2 produces 384-dim vectors)
 const EMBEDDING_DIM = 384;
+
+// Model name used for lembed registration
+const EMBEDDING_MODEL = 'all-MiniLM-L6-v2';
+
+// Default model path (can be overridden)
+const DEFAULT_MODEL_PATH = join(homedir(), '.claude-mem', 'models', 'all-MiniLM-L6-v2.gguf');
 
 export interface ToolEvent {
   id?: number;
@@ -49,12 +58,23 @@ export interface SearchResult {
   distance: number;
 }
 
+export interface SimpleMemoryOptions {
+  dataDir?: string;
+  modelPath?: string;
+}
+
 export class SimpleMemory {
   private db: Database.Database;
   private dataDir: string;
+  private modelPath: string;
+  private lembedAvailable: boolean = false;
 
-  constructor(dataDir?: string) {
-    this.dataDir = dataDir || join(homedir(), '.claude-mem');
+  constructor(options: SimpleMemoryOptions | string = {}) {
+    // Handle legacy string argument for backwards compatibility
+    const opts = typeof options === 'string' ? { dataDir: options } : options;
+
+    this.dataDir = opts.dataDir || join(homedir(), '.claude-mem');
+    this.modelPath = opts.modelPath || DEFAULT_MODEL_PATH;
 
     // Ensure data directory exists
     if (!existsSync(this.dataDir)) {
@@ -64,8 +84,16 @@ export class SimpleMemory {
     const dbPath = join(this.dataDir, 'simple-memory.db');
     this.db = new Database(dbPath);
 
-    // Load sqlite-vec extension
+    // Load sqlite-vec extension (vector storage and search)
     sqliteVec.load(this.db);
+
+    // Load sqlite-lembed extension (embedding generation)
+    try {
+      sqliteLembed.load(this.db);
+      this.initLembed();
+    } catch (err: any) {
+      console.warn('[SimpleMemory] sqlite-lembed not available, semantic search disabled:', err.message);
+    }
 
     // Configure for performance
     this.db.pragma('journal_mode = WAL');
@@ -74,6 +102,38 @@ export class SimpleMemory {
 
     // Initialize schema
     this.initSchema();
+  }
+
+  /**
+   * Initialize sqlite-lembed with the embedding model
+   */
+  private initLembed(): void {
+    if (!existsSync(this.modelPath)) {
+      console.warn(`[SimpleMemory] Model not found at ${this.modelPath}`);
+      console.warn('[SimpleMemory] Download with: curl -L -o ~/.claude-mem/models/all-MiniLM-L6-v2.gguf https://huggingface.co/asg017/sqlite-lembed-model-examples/resolve/main/all-MiniLM-L6-v2/all-MiniLM-L6-v2.e4ce9877.q8_0.gguf');
+      return;
+    }
+
+    try {
+      // Register the embedding model with lembed
+      // Model is loaded from file and registered with a name for use in queries
+      this.db.exec(`
+        INSERT INTO temp.lembed_models(name, model)
+        SELECT '${EMBEDDING_MODEL}', lembed_model_from_file('${this.modelPath}')
+        WHERE NOT EXISTS (SELECT 1 FROM temp.lembed_models WHERE name = '${EMBEDDING_MODEL}')
+      `);
+      this.lembedAvailable = true;
+      console.log('[SimpleMemory] sqlite-lembed initialized with', EMBEDDING_MODEL);
+    } catch (err: any) {
+      console.warn('[SimpleMemory] Failed to register embedding model:', err.message);
+    }
+  }
+
+  /**
+   * Check if semantic search (lembed) is available
+   */
+  isSemanticSearchAvailable(): boolean {
+    return this.lembedAvailable;
   }
 
   private initSchema(): void {
@@ -270,17 +330,135 @@ export class SimpleMemory {
   }
 
   /**
-   * Search events by text (uses sqlite-vec if embeddings available)
-   * Falls back to simple text search if no embeddings
+   * Generate text to embed for an event (used for both indexing and search)
    */
-  async searchEvents(
+  private getEmbeddableText(event: ToolEvent | Omit<ToolEvent, 'id'>): string {
+    // Combine relevant fields for embedding
+    const parts: string[] = [];
+
+    // Tool name gives context
+    parts.push(`[${event.tool_name}]`);
+
+    // Extract meaningful content from input (file paths, queries, etc.)
+    try {
+      const input = JSON.parse(event.tool_input);
+      if (input.file_path) parts.push(input.file_path);
+      if (input.pattern) parts.push(input.pattern);
+      if (input.query) parts.push(input.query);
+      if (input.command) parts.push(input.command);
+    } catch {
+      // If not JSON, use raw input (truncated)
+      const inputPreview = event.tool_input.slice(0, 500);
+      parts.push(inputPreview);
+    }
+
+    // Include truncated output for context
+    const outputPreview = event.tool_output.slice(0, 1000);
+    parts.push(outputPreview);
+
+    return parts.join(' ');
+  }
+
+  /**
+   * Generate embedding using sqlite-lembed (in-database)
+   */
+  generateEmbedding(text: string): Buffer | null {
+    if (!this.lembedAvailable) {
+      return null;
+    }
+
+    try {
+      // Use lembed() SQL function to generate embedding
+      const stmt = this.db.prepare(`SELECT lembed('${EMBEDDING_MODEL}', ?) as embedding`);
+      const result = stmt.get(text) as { embedding: Buffer } | undefined;
+      return result?.embedding || null;
+    } catch (err: any) {
+      console.warn('[SimpleMemory] Embedding generation failed:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Search events semantically using sqlite-lembed + sqlite-vec
+   * Falls back to text search if embeddings unavailable
+   */
+  searchEvents(
     query: string,
-    options: { project?: string; limit?: number } = {}
-  ): Promise<SearchResult[]> {
+    options: { project?: string; limit?: number; semantic?: boolean } = {}
+  ): SearchResult[] {
+    const { project, limit = 20, semantic = true } = options;
+
+    // Try semantic search if available and requested
+    if (semantic && this.lembedAvailable) {
+      return this.semanticSearch(query, { project, limit });
+    }
+
+    // Fall back to text search
+    return this.textSearch(query, { project, limit });
+  }
+
+  /**
+   * Semantic search using lembed for query embedding + vec for similarity
+   */
+  private semanticSearch(
+    query: string,
+    options: { project?: string; limit?: number }
+  ): SearchResult[] {
     const { project, limit = 20 } = options;
 
-    // For now, use simple text search (LIKE)
-    // TODO: Implement embedding generation and vector search
+    // First, ensure recent events have embeddings
+    this.ensureEmbeddings(limit * 2);
+
+    // Generate query embedding using lembed()
+    const queryEmbedding = this.generateEmbedding(query);
+    if (!queryEmbedding) {
+      // Fall back to text search
+      return this.textSearch(query, { project, limit });
+    }
+
+    // Use sqlite-vec for KNN search
+    // Note: project filtering happens after KNN due to vec0 limitations
+    const stmt = this.db.prepare(`
+      SELECT e.event_id, e.distance, t.*
+      FROM event_embeddings e
+      JOIN tool_events t ON t.id = e.event_id
+      WHERE e.embedding MATCH ? AND k = ?
+      ORDER BY e.distance
+    `);
+
+    const rows = stmt.all(queryEmbedding, limit * 2) as any[];
+
+    // Filter by project if specified and take limit
+    const filtered = project
+      ? rows.filter(row => row.project === project).slice(0, limit)
+      : rows.slice(0, limit);
+
+    return filtered.map(row => ({
+      event: {
+        id: row.id,
+        session_id: row.session_id,
+        project: row.project,
+        tool_name: row.tool_name,
+        tool_input: row.tool_input,
+        tool_output: row.tool_output,
+        cwd: row.cwd,
+        created_at: row.created_at,
+        files_touched: row.files_touched ? JSON.parse(row.files_touched) : undefined,
+        event_type: row.event_type
+      },
+      distance: row.distance
+    }));
+  }
+
+  /**
+   * Simple text search (LIKE-based fallback)
+   */
+  private textSearch(
+    query: string,
+    options: { project?: string; limit?: number }
+  ): SearchResult[] {
+    const { project, limit = 20 } = options;
+
     let sql = `
       SELECT * FROM tool_events
       WHERE (
@@ -316,6 +494,43 @@ export class SimpleMemory {
       },
       distance: 0 // Text search doesn't have distance
     }));
+  }
+
+  /**
+   * Ensure recent events have embeddings (lazy generation)
+   */
+  private ensureEmbeddings(limit: number = 100): void {
+    if (!this.lembedAvailable) return;
+
+    const eventsWithoutEmbeddings = this.getEventsWithoutEmbeddings(limit);
+
+    for (const event of eventsWithoutEmbeddings) {
+      if (!event.id) continue;
+
+      const text = this.getEmbeddableText(event);
+      const textHash = createHash('md5').update(text).digest('hex');
+
+      // Generate embedding using lembed
+      const embedding = this.generateEmbedding(text);
+      if (embedding) {
+        // Store directly as BLOB from lembed (already in correct format)
+        try {
+          this.db.exec(`
+            INSERT OR REPLACE INTO event_embeddings(event_id, embedding)
+            VALUES (${event.id}, x'${embedding.toString('hex')}')
+          `);
+
+          // Store cache metadata
+          const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO embedding_cache (event_id, text_hash, created_at)
+            VALUES (?, ?, ?)
+          `);
+          stmt.run(event.id, textHash, Date.now());
+        } catch (err: any) {
+          console.warn(`[SimpleMemory] Failed to store embedding for event ${event.id}:`, err.message);
+        }
+      }
+    }
   }
 
   /**
